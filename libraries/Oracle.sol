@@ -2,362 +2,323 @@
 pragma solidity >=0.5.0;
 
 /// @title Oracle
-/// @notice Provide Liquidity and Price data of tokens
-/// @dev Stored Oracle data . Every single Pool which will be initialized will contain the length of 1.New Array slots will
-/// gets increase if anyone want to add liquidity to increase the array length to its max.But as the function new slots will
-/// gets add when any slots gets filled or populated .Data will be revised once again when the oracle array gets filled or populated.
-/// In the initial length will be 0.
+/// @notice Provides price and liquidity data useful for a wide variety of system designs
+/// @dev Instances of stored oracle data, "observations", are collected in the oracle array
+/// Every pool is initialized with an oracle array length of 1. Anyone can pay the SSTOREs to increase the
+/// maximum length of the oracle array. New slots will be added when the array is fully populated.
+/// Inspections are overwritten when the full length of the oracle array is populated.
+/// The most recent inspection is available, independent of the length of the oracle array, by passing 0 to observe()
 library Oracle {
-    struct Data {
-        uint32 blockTimestamp; // Timestamp when the price feeds gets updated for every pool
-        int56 tickAccumulate; // tick * time elapsed since the pool was first initialized
-        uint160 secondsPerLiquidityX128; // seconds elapsed / max(1,liquidity) first initialized
-        bool initialized; //whether or not initialized
+    struct Inspection {
+        // the block timestamp of the inspection
+        uint32 blockTimestamp;
+        // the tick accumulator, i.e. tick * time elapsed since the pool was first initialized
+        int56 tickCumulative;
+        // the seconds per liquidity, i.e. seconds elapsed / max(1, liquidity) since the pool was first initialized
+        uint160 secondsPerLiquidityCumulativeX128;
+        // whether or not the inspection is initialized
+        bool initialized;
     }
 
-    /// @notice UpdateObservation will update the Data with the new Data.
-    /// @dev blockTimestamp must be greater than or equal to lastUpdate.
-    /// @param lastUpdate last data Timestamp which is to be update.
-    /// @param blockTimestamp Timestamp of new observation.
-    /// @param active_tick Active tick at the time of new observation.
-    /// @param liquidity liquidity in that tick range in that new observation
-    /// @return Data in memory which will be filled or populated
-    function UpdateObservation(
-        Data memory lastUpdate,
+    /// @notice Transforms a previous inspection into a new inspection, given the passage of time and the current tick and liquidity values
+    /// @dev blockTimestamp _must_ be chronologically equal to or greater than last.blockTimestamp, safe for 0 or 1 overflows
+    /// @param last The specified inspection to be transformed
+    /// @param blockTimestamp The timestamp of the new inspection
+    /// @param tick The active tick at the time of the new inspection
+    /// @param liquidity The total in-range liquidity at the time of the new inspection
+    /// @return Observation The newly populated observation
+    function transformToLatest(
+        Inspection memory last,
         uint32 blockTimestamp,
-        int24 active_tick,
+        int24 tick,
         uint128 liquidity
-    ) private pure returns (Data memory) {
-        uint32 delta = blockTimestamp - lastUpdate.blockTimestamp;
+    ) private pure returns (Inspection memory) {
+        uint32 delta = blockTimestamp - last.blockTimestamp;
         return
-            Data({
+            Inspection({
                 blockTimestamp: blockTimestamp,
-                tickAccumulate: lastUpdate.tickAccumulate +
-                    int56(active_tick) *
-                    delta,
-                secondsPerLiquidityX128: lastUpdate.secondsPerLiquidityX128 +
+                tickCumulative: last.tickCumulative + int56(tick) * int32(delta),
+                secondsPerLiquidityCumulativeX128: last.secondsPerLiquidityCumulativeX128 +
                     ((uint160(delta) << 128) / (liquidity > 0 ? liquidity : 1)),
                 initialized: true
             });
     }
 
-    /// @notice Initializing the slot for the first pool array.
-    /// @param pool stored array >> 65535 is the memory size upto which a device can hold if crosses 65535 then it will repopulate itself to the null Index.
-    /// @param time of the Initialization of stored array
-    /// @return grouping the numbers of array which are filled or populated
-    /// @return groupingNext the new array index which will be independent or not fully populated yet with data
-    function InitializingSlot(Data[65535] storage pool, uint32 time)
+    /// @notice Initialize the oracle array by writing the first slot. Called once for the lifecycle of the observations array
+    /// @param self The stored oracle array
+    /// @param time The time of the oracle initialization, via block.timestamp truncated to uint32
+    /// @return cardinality The number of populated elements in the oracle array
+    /// @return cardinalityNext The new length of the oracle array, independent of population
+    function initializeInspection(Inspection[65535] storage self, uint32 time)
         internal
-        returns (uint16 grouping, uint16 groupingNext)
+        returns (uint16 cardinality, uint16 cardinalityNext)
     {
-        pool[0] = Data({
+        self[0] = Inspection({
             blockTimestamp: time,
-            tickAccumulate: 0,
-            secondsPerLiquidityX128: 0,
+            tickCumulative: 0,
+            secondsPerLiquidityCumulativeX128: 0,
             initialized: true
         });
         return (1, 1);
     }
 
-    /// @notice will store/write the Data to the array.
-    /// @dev write after every block is been executed.Index represents the most recently written element.
-    /// If the grouping is at its end , then nextgrouping must be greater then the current grouping,which means grouping will be increased.
-    /// @param pool stored array
-    /// @param index The index of the observation that was most recently written to the Data array
-    /// @param blockTimestamp The timestamp of the new Data
-    /// @param active_tick The active tick at the time of the new observation
-    /// @param liquidity liquidity in that tick range in that new observation
-    /// @param grouping number of filled /populated in pool array
-    /// @param groupingNext new number which will be used to fill/populate , independent of population
-    /// @return indexUpdated new Index of most recently written element in the pool array
-    /// @return final_group new grouping in the pool array
-    function write(
-        Data[65535] storage pool,
+    /// @notice Writes an oracle inspection to the array
+    /// @dev Writable at most once per block. Index represents the most recently written element. cardinality and index must be tracked externally.
+    /// If the index is at the end of the allowable array length (according to cardinality), and the next cardinality
+    /// is greater than the current one, cardinality may be increased. This restriction is created to preserve ordering.
+    /// @param self The stored oracle array
+    /// @param index The index of the inspection that was most recently written to the observations array
+    /// @param blockTimestamp The timestamp of the new inspection
+    /// @param tick The active tick at the time of the new inspection
+    /// @param liquidity The total in-range liquidity at the time of the new inspection
+    /// @param cardinality The number of populated elements in the oracle array
+    /// @param cardinalityNext The new length of the oracle array, independent of population
+    /// @return indexUpdated The new index of the most recently written element in the oracle array
+    /// @return cardinalityUpdated The new cardinality of the oracle array
+    function writeInspection(
+        Inspection[65535] storage self,
         uint16 index,
         uint32 blockTimestamp,
-        int24 active_tick,
+        int24 tick,
         uint128 liquidity,
-        uint16 grouping,
-        uint16 groupingNext
-    ) internal returns (uint16 indexUpdated, uint16 final_group) {
-        Data memory lastUpdate = pool[index];
+        uint16 cardinality,
+        uint16 cardinalityNext
+    ) internal returns (uint16 indexUpdated, uint16 cardinalityUpdated) {
+        Inspection memory last = self[index];
 
-        // if Data is already up to date
-        if (lastUpdate.blockTimestamp == blockTimestamp)
-            return (index, grouping);
-        // if above condition gets true
-        if (groupingNext > grouping && index == (grouping - 1)) {
-            final_group = groupingNext;
+        // early return if we've already written an observation this block
+        if (last.blockTimestamp == blockTimestamp) return (index, cardinality);
+
+        // if the conditions are right, we can bump the cardinality
+        if (cardinalityNext > cardinality && index == (cardinality - 1)) {
+            cardinalityUpdated = cardinalityNext;
         } else {
-            final_group = grouping;
+            cardinalityUpdated = cardinality;
         }
-        indexUpdated = (index + 1) % groupingNext;
-        pool[indexUpdated] = UpdateObservation(
-            lastUpdate,
-            blockTimestamp,
-            active_tick,
-            liquidity
-        );
+
+        indexUpdated = (index + 1) % cardinalityUpdated;
+        self[indexUpdated] = transformToLatest(last, blockTimestamp, tick, liquidity);
     }
 
-    /// @notice to store the next Data in pool array
-    /// @param pool stored array
-    /// @param recent recent/current grouping in the pool storage
-    /// @param next next proposed grouping in the pool storage
-    /// @return next The next grouping which will be populated in the pool array
-    function next_Observation(
-        Data[65535] storage pool,
-        uint16 recent,
+    /// @notice Prepares the oracle array to store up to `next` observations
+    /// @param self The stored oracle array
+    /// @param current The current next cardinality of the oracle array
+    /// @param next The proposed next cardinality which will be populated in the oracle array
+    /// @return next The next cardinality which will be populated in the oracle array
+    function growCardinality(
+        Inspection[65535] storage self,
+        uint16 current,
         uint16 next
     ) internal returns (uint16) {
-        require(recent > 0, "Not Initialized");
-        if (next <= recent) return recent;
-        for (uint16 i = recent; i < next; i++) pool[i].blockTimestamp = 1;
+        require(current > 0, 'I');
+        // no-op if the passed next value isn't greater than the current next value
+        if (next <= current) return current;
+        // store in each slot to prevent fresh SSTOREs in swaps
+        // this data will not be used because the initialized boolean is still false
+        for (uint16 i = current; i < next; i++) self[i].blockTimestamp = 1;
         return next;
     }
 
-    /// @notice comparison between previous(x) and next(y) Timestamp
-    /// @dev x and y must be recorded as per required.
+    /// @notice comparator for 32-bit timestamps
+    /// @dev safe for 0 or 1 overflows, a and b _must_ be chronologically before or equal to time
     /// @param time A timestamp truncated to 32 bits
-    /// @param x A comparison timestamp from which to determine the relative position of `time
-    /// @param y From which to determine the relative position of `time`
-    /// @return bool Whether x <= y
-    function Adjust_Time(
+    /// @param a A comparison timestamp from which to determine the relative position of `time`
+    /// @param b From which to determine the relative position of `time`
+    /// @return bool Whether `a` is chronologically <= `b`
+    function lte(
         uint32 time,
-        uint32 x,
-        uint32 y
+        uint32 a,
+        uint32 b
     ) private pure returns (bool) {
         // if there hasn't been overflow, no need to adjust
-        if (x <= time && y <= time) return x <= y;
-        uint256 x_adjust = x > time ? x : x + 2**32;
-        uint256 y_adjust = y > time ? y : y + 2**32;
+        if (a <= time && b <= time) return a <= b;
 
-        return x_adjust <= y_adjust;
+        uint256 aAdjusted = a > time ? a : a + 2**32;
+        uint256 bAdjusted = b > time ? b : b + 2**32;
+
+        return aAdjusted <= bAdjusted;
     }
 
-    /// @notice Fetches the Data Btarget and Atarget a target, i.e. where [Btarget, Atarget] is satisfied.
-    /// The result may be the same Data, or adjacent Data.
-    /// @dev The answer must be contained in the array, used when the target is located within the stored Data
-    /// boundaries: older than the most recent Data and younger, or the same age as, the oldest Data
-    /// @param pool stored array
-    /// @param current_block current Timestamp
-    /// @param reserved_time The timestamp at which the reserved Data should be for
-    /// @param index The index of the Data that was most recently written to the Data array
-    /// @param grouping The number of populated elements in the oracle array
-    /// @return Btarget The observation recorded before, or at, the target
-    /// @return Atarget The observation recorded at, or after, the target
-
-    function SearchArray(
-        Data[65535] storage pool,
-        uint32 current_block,
-        uint32 reserved_time,
+    /// @notice Fetches the observations beforeOrAt and atOrAfter a target, i.e. where [beforeOrAt, atOrAfter] is satisfied.
+    /// The result may be the same observation, or adjacent observations.
+    /// @dev The answer must be contained in the array, used when the target is located within the stored observation
+    /// boundaries: older than the most recent observation and younger, or the same age as, the oldest observation
+    /// @param self The stored oracle array
+    /// @param time The current block.timestamp
+    /// @param target The timestamp at which the reserved observation should be for
+    /// @param index The index of the observation that was most recently written to the observations array
+    /// @param cardinality The number of populated elements in the oracle array
+    /// @return beforeOrAt The observation recorded before, or at, the target
+    /// @return atOrAfter The observation recorded at, or after, the target
+    function binarySearch(
+        Inspection[65535] storage self,
+        uint32 time,
+        uint32 target,
         uint16 index,
-        uint16 grouping
-    ) private view returns (Data memory Btarget, Data memory Atarget) {
-        uint256 old = (index + 1) % grouping; // oldest Data
-        uint256 latest = old + grouping - 1; // newest Data
-        for (uint256 i; true; i = (old + latest) / 2) {
-            Btarget = pool[i % grouping];
-            // if uninitialized,keeping searching higher (more recently)
-            if (!Btarget.initialized) {
-                old = latest + 1;
+        uint16 cardinality
+    ) private view returns (Inspection memory beforeOrAt, Inspection memory atOrAfter) {
+        uint256 l = (index + 1) % cardinality; // oldest inspection
+        uint256 r = l + cardinality - 1; // newest inspection
+        uint256 i;
+        while (true) {
+            i = (l + r) / 2;
+
+            beforeOrAt = self[i % cardinality];
+
+            // we've landed on an uninitialized tick, keep searching higher (more recently)
+            if (!beforeOrAt.initialized) {
+                l = i + 1;
                 continue;
             }
 
-            Atarget = pool[(i + 1) % grouping];
+            atOrAfter = self[(i + 1) % cardinality];
 
-            bool at_Atarget_or_after = Adjust_Time(
-                current_block,
-                Btarget.blockTimestamp,
-                reserved_time
-            );
+            bool targetAtOrAfter = lte(time, beforeOrAt.blockTimestamp, target);
+
             // check if we've found the answer!
-            if (
-                at_Atarget_or_after &&
-                Adjust_Time(
-                    current_block,
-                    reserved_time,
-                    Atarget.blockTimestamp
-                )
-            ) break;
+            if (targetAtOrAfter && lte(time, target, atOrAfter.blockTimestamp)) break;
 
-            if (!at_Atarget_or_after) latest = i - 1;
-            else old = i + 1;
+            if (!targetAtOrAfter) r = i - 1;
+            else l = i + 1;
         }
     }
 
-    /// @notice Fetches the Data Btarget and Atarget a given target, i.e. where [Btarget, Atarget] is satisfied
-    /// @dev Assumes there is at least 1 initialized Data.
-    /// Used by ObservePrevious() to compute the related blockTimestamp values as of a given block timestamp.
-    /// @param pool stored array
-    /// @param current_block current Timestamp
-    /// @param reserved_time The timestamp at which the reserved Data should be for
-    /// @param active_tick The active tick at the time of the returned or simulated Data
-    /// @param index The index of the Data that was most recently written to the Data array
+    /// @notice Fetches the inspections beforeOrAt and atOrAfter a given target, i.e. where [beforeOrAt, atOrAfter] is satisfied
+    /// @dev Assumes there is at least 1 initialized inspection.
+    /// Used by observeSingle() to compute the counterfactual accumulator values as of a given block timestamp.
+    /// @param self The stored oracle array
+    /// @param time The current block.timestamp
+    /// @param target The timestamp at which the reserved inspection should be for
+    /// @param tick The active tick at the time of the returned or simulated inspection
+    /// @param index The index of the inspection that was most recently written to the inspections array
     /// @param liquidity The total pool liquidity at the time of the call
-    /// @param grouping The number of populated elements in the pool array
-    /// @return Btarget The Data which occurred at, or before, the given timestamp
-    /// @return Atarget The Data which occurred at, or after, the given timestamp
-    function getReliableObservation(
-        Data[65535] storage pool,
-        uint32 current_block,
-        uint32 reserved_time,
-        int24 active_tick,
+    /// @param cardinality The number of populated elements in the oracle array
+    /// @return beforeOrAt The inspection which occurred at, or before, the given timestamp
+    /// @return atOrAfter The inspection which occurred at, or after, the given timestamp
+    function getSurroundingInspections(
+        Inspection[65535] storage self,
+        uint32 time,
+        uint32 target,
+        int24 tick,
         uint16 index,
         uint128 liquidity,
-        uint16 grouping
-    ) private view returns (Data memory Btarget, Data memory Atarget) {
-        // optimistically set before to the newest Data
-        Btarget = pool[index];
-        // if the target is chronologically at or after the newest Data, we can early return
-        if (Adjust_Time(current_block, Btarget.blockTimestamp, reserved_time)) {
-            if (Btarget.blockTimestamp == reserved_time) {
-                // if newest Data equals target, we're in the same block, so we can ignore Atarget
-                return (Btarget, Atarget);
+        uint16 cardinality
+    ) private view returns (Inspection memory beforeOrAt, Inspection memory atOrAfter) {
+        // optimistically set before to the newest inspection
+        beforeOrAt = self[index];
+
+        // if the target is chronologically at or after the newest inspection, we can early return
+        if (lte(time, beforeOrAt.blockTimestamp, target)) {
+            if (beforeOrAt.blockTimestamp == target) {
+                // if newest inspection equals target, we're in the same block, so we can ignore atOrAfter
+                return (beforeOrAt, atOrAfter);
             } else {
-                // otherwise, we need to UpdateObservation
-                return (
-                    Btarget,
-                    UpdateObservation(
-                        Btarget,
-                        reserved_time,
-                        active_tick,
-                        liquidity
-                    )
-                );
+                // otherwise, we need to transform
+                return (beforeOrAt, transformToLatest(beforeOrAt, target, tick, liquidity));
             }
         }
-        // now, set before to the oldest Data
-        Btarget = pool[(index + 1) % grouping];
-        if (!Btarget.initialized) Btarget = pool[0];
-        // ensure that the target is chronologically at or after the oldest Data
-        require(
-            Adjust_Time(current_block, Btarget.blockTimestamp, reserved_time),
-            "Before the recent observation"
-        );
-        // if we've reached this point, we have to search array
-        return SearchArray(pool, current_block, reserved_time, index, grouping);
+
+        // now, set before to the oldest observation
+        beforeOrAt = self[(index + 1) % cardinality];
+        if (!beforeOrAt.initialized) beforeOrAt = self[0];
+
+        // ensure that the target is chronologically at or after the oldest observation
+        require(lte(time, beforeOrAt.blockTimestamp, target), 'OLD');
+
+        // if we've reached this point, we have to binary search
+        return binarySearch(self, time, target, index, cardinality);
     }
 
-    /// @notice Reverts if Data at or before the desired observation timestamp does not exist
+    /// @dev Reverts if an inspection at or before the desired inspection timestamp does not exist.
     /// 0 may be passed as `secondsAgo' to return the current cumulative values.
-    /// If called with a timestamp falling between two Data observations, returns the recorded values
-    /// at exactly the timestamp between the two observed data.
-    /// @param pool stored array
-    /// @param current_block current block timestamp
-    /// @param secondsAgo The amount of time to look back, in seconds, at which point to return an Data
-    /// @param active_tick current tick
-    /// @param index The index of the observation that was most recently written to the Data array
-    /// @param liquidity  current in-range pool liquidity
-    /// @param grouping The number of populated elements in the pool array
-    /// @return ticksPerSeconds The tick * time elapsed since the pool was first initialized, as of `secondsAgo`
-    /// @return LiquidityPerSeconds The time elapsed / max(1, liquidity) since the pool was first initialized, as of `secondsAgo`
-    function ObservePrevious(
-        Data[65535] storage pool,
-        uint32 current_block,
+    /// If called with a timestamp falling between two inspections, returns the counterfactual accumulator values
+    /// at exactly the timestamp between the two inspections.
+    /// @param self The stored oracle array
+    /// @param time The current block timestamp
+    /// @param secondsAgo The amount of time to look back, in seconds, at which point to return an inspection
+    /// @param tick The current tick
+    /// @param index The index of the inspection that was most recently written to the inspections array
+    /// @param liquidity The current in-range pool liquidity
+    /// @param cardinality The number of populated elements in the oracle array
+    /// @return tickCumulative The tick * time elapsed since the pool was first initialized, as of `secondsAgo`
+    /// @return secondsPerLiquidityCumulativeX128 The time elapsed / max(1, liquidity) since the pool was first initialized, as of `secondsAgo`
+    function inspectSingle(
+        Inspection[65535] storage self,
+        uint32 time,
         uint32 secondsAgo,
-        int24 active_tick,
+        int24 tick,
         uint16 index,
         uint128 liquidity,
-        uint16 grouping
-    )
-        internal
-        view
-        returns (int56 ticksPerSeconds, uint160 LiquidityPerSeconds)
-    {
+        uint16 cardinality
+    ) internal view returns (int56 tickCumulative, uint160 secondsPerLiquidityCumulativeX128) {
         if (secondsAgo == 0) {
-            Data memory lastUpdate = pool[index];
-            if (lastUpdate.blockTimestamp != current_block)
-                lastUpdate = UpdateObservation(
-                    lastUpdate,
-                    current_block,
-                    active_tick,
-                    liquidity
-                );
-            return (
-                lastUpdate.tickAccumulate,
-                lastUpdate.secondsPerLiquidityX128
-            );
+            Inspection memory last = self[index];
+            if (last.blockTimestamp != time) last = transformToLatest(last, time, tick, liquidity);
+            return (last.tickCumulative, last.secondsPerLiquidityCumulativeX128);
         }
 
-        uint32 reserved_time = current_block - secondsAgo;
+        uint32 target = time - secondsAgo;
 
-        (Data memory Btarget, Data memory Atarget) = getReliableObservation(
-            pool,
-            current_block,
-            reserved_time,
-            active_tick,
-            index,
-            liquidity,
-            grouping
-        );
-        if (reserved_time == Btarget.blockTimestamp) {
+        (Inspection memory beforeOrAt, Inspection memory atOrAfter) =
+            getSurroundingInspections(self, time, target, tick, index, liquidity, cardinality);
+
+        if (target == beforeOrAt.blockTimestamp) {
             // we're at the left boundary
-            return (Btarget.tickAccumulate, Btarget.secondsPerLiquidityX128);
-        } else if (reserved_time == Atarget.blockTimestamp) {
+            return (beforeOrAt.tickCumulative, beforeOrAt.secondsPerLiquidityCumulativeX128);
+        } else if (target == atOrAfter.blockTimestamp) {
             // we're at the right boundary
-            return (Atarget.tickAccumulate, Atarget.secondsPerLiquidityX128);
+            return (atOrAfter.tickCumulative, atOrAfter.secondsPerLiquidityCumulativeX128);
         } else {
             // we're in the middle
-            uint32 TimestampDelta = Atarget.blockTimestamp -
-                Btarget.blockTimestamp;
-            uint32 mainDelta = reserved_time - Btarget.blockTimestamp;
+            uint32 observationTimeDelta = atOrAfter.blockTimestamp - beforeOrAt.blockTimestamp;
+            uint32 targetDelta = target - beforeOrAt.blockTimestamp;
             return (
-                Btarget.tickAccumulate +
-                    ((Atarget.tickAccumulate - Btarget.tickAccumulate) /
-                        TimestampDelta) *
-                    mainDelta,
-                Btarget.secondsPerLiquidityX128 +
+                beforeOrAt.tickCumulative +
+                    ((atOrAfter.tickCumulative - beforeOrAt.tickCumulative) / int32(observationTimeDelta)) *
+                    int32(targetDelta),
+                beforeOrAt.secondsPerLiquidityCumulativeX128 +
                     uint160(
                         (uint256(
-                            Atarget.secondsPerLiquidityX128 -
-                                Btarget.secondsPerLiquidityX128
-                        ) * mainDelta) / TimestampDelta
+                            atOrAfter.secondsPerLiquidityCumulativeX128 - beforeOrAt.secondsPerLiquidityCumulativeX128
+                        ) * targetDelta) / observationTimeDelta
                     )
             );
         }
     }
 
     /// @notice Returns the accumulator values as of each time seconds ago from the given time in the array of `secondsAgos`
-    /// @dev Reverts if `secondsAgos` > old Data
-    /// @param pool The stored oracle array
-    /// @param current_block The current block.timestamp
-    /// @param new_seconds Each amount of time to look back, in seconds, at which point to return an Data
-    /// @param active_tick The current tick
-    /// @param index The index of the Data that was most recently written to the Datas array
+    /// @dev Reverts if `secondsAgos` > oldest observation
+    /// @param self The stored oracle array
+    /// @param time The current block.timestamp
+    /// @param secondsAgos Each amount of time to look back, in seconds, at which point to return an observation
+    /// @param tick The current tick
+    /// @param index The index of the observation that was most recently written to the observations array
     /// @param liquidity The current in-range pool liquidity
-    /// @param grouping The number of populated elements in the oracle array
-    /// @return ticksPerSeconds the return variables of a contract’s function state variable
-    /// @return LiquidityPerSeconds the return variables of a contract’s function state variable
-    function Conclusion(
-        Data[65535] storage pool,
-        uint32 current_block,
-        uint32[] memory new_seconds,
-        int24 active_tick,
+    /// @param cardinality The number of populated elements in the oracle array
+    /// @return tickCumulatives The tick * time elapsed since the pool was first initialized, as of each `secondsAgo`
+    /// @return secondsPerLiquidityCumulativeX128s The cumulative seconds / max(1, liquidity) since the pool was first initialized, as of each `secondsAgo`
+    function inspect(
+        Inspection[65535] storage self,
+        uint32 time,
+        uint32[] memory secondsAgos,
+        int24 tick,
         uint16 index,
         uint128 liquidity,
-        uint16 grouping
-    )
-        internal
-        view
-        returns (
-            int56[] memory ticksPerSeconds,
-            uint160[] memory LiquidityPerSeconds
-        )
-    {
-        require(grouping > 0, "Pool Hasn't Initialized");
+        uint16 cardinality
+    ) internal view returns (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128s) {
+        require(cardinality > 0, 'I');
 
-        ticksPerSeconds = new int56[](new_seconds.length);
-        LiquidityPerSeconds = new uint160[](new_seconds.length);
-        for (uint256 x = 0; x < new_seconds.length; x++) {
-            (ticksPerSeconds[x], LiquidityPerSeconds[x]) = ObservePrevious(
-                pool,
-                current_block,
-                new_seconds[x],
-                active_tick,
+        tickCumulatives = new int56[](secondsAgos.length);
+        secondsPerLiquidityCumulativeX128s = new uint160[](secondsAgos.length);
+        for (uint256 i = 0; i < secondsAgos.length; i++) {
+            (tickCumulatives[i], secondsPerLiquidityCumulativeX128s[i]) = inspectSingle(
+                self,
+                time,
+                secondsAgos[i],
+                tick,
                 index,
                 liquidity,
-                grouping
+                cardinality
             );
         }
     }
