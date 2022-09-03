@@ -1,93 +1,88 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
-pragma solidity >=0.4.0;
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity >=0.5.0;
 
-/// @title Provide user investment update
-/// @notice Will update the user investment By providing the range limits where user have invested there liquidity.
+import './Math.sol';
+import './FixedPoint128.sol';
+import './LiquidityMath.sol';
 
-import "../libraries/Math.sol";
-import "@uniswap/contracts/libraries/FixedPoint128.sol";
-import "@uniswap/contracts/libraries/LiquidityMath.sol";
-
-library UserInvestment {
-    // Description of the user liquidity
+/// @title Investment
+/// @notice Investments represent an owner address' liquidity between a lower and upper tick boundary
+/// @dev Investments store additional state for tracking fees owed to the investment
+library Investment {
+    // desc stored for each user's position
     struct Desc {
-        // user liquidity amount
-        uint128 User_Liquidity;
-        // Will update the user fee from last update
-        // Highest Order 128 Bit
-        uint256 feeUpdationInside0lastx128;
-        uint256 feeUpdationInside1lastx128;
-        // amount owed by the user token0/token1 during Investment
-        uint128 token0;
-        uint128 token1;
+        // the amount of liquidity owned by this position
+        uint128 amountOfLiquidity;
+        // fee growth per unit of liquidity as of the last update to liquidity or fees owed
+        uint256 feeGrowthInside0LastX128PerUnit;
+        uint256 feeGrowthInside1LastX128PerUnit;
+        // the fees owed to the position owner in token0/token1
+        uint128 tokensOwed0ToOwner;
+        uint128 tokensOwed1ToOwner;
     }
 
-    /// @notice Returns the record of the User
-    /// @param User mapping of the user in bytes32 from Desc
-    /// @param owner Address of the Investor
-    /// @param lowerrange lower range of the liquidity amount
-    /// @param upperrange upper range of the liquidity amount
-    /// @return investment Will give the description of the user investment
-    function getRecord(
-        mapping(bytes32 => Desc) storage User,
+    /// @notice Returns the Desc struct of a investment, given an owner and investment boundaries
+    /// @param self The mapping containing all user investments
+    /// @param owner The address of the investment owner
+    /// @param tickLower The lower tick boundary of the investment
+    /// @param tickUpper The upper tick boundary of the investment
+    /// @return investment The investment desc struct of the given owners' investment
+    function get(
+        mapping(bytes32 => Desc) storage self,
         address owner,
-        int24 lowerrange,
-        int24 upperrange
-    ) internal view returns (UserInvestment.Desc storage investment) {
-        investment = User[
-            keccak256(abi.encodePacked(owner, lowerrange, upperrange))
-        ];
+        int24 tickLower,
+        int24 tickUpper
+    ) internal view returns (Investment.Desc storage investment) {
+        investment = self[keccak256(abi.encodePacked(owner, tickLower, tickUpper))];
     }
 
-    /// @notice Will update the user Range/Investments
-    /// @param User Will update the user investment
-    /// @param feeUpdateInside0firstx128 Inside Growth of fee in token0(feeUpdateInside0firstx128 = global - outside)
-    /// @param feeUpdateInside1firstx128 Inside Growth of fee in token1(feeUpdateInside1firstx128 = global - outside)
-    /// @param Total_liquidation User Liquidity Delta
-    function updateRecord(
-        Desc storage User,
-        uint256 feeUpdateInside0firstx128,
-        uint256 feeUpdateInside1firstx128,
-        int128 Total_liquidation
+    /// @notice Credits accumulated fees to a user's investment
+    /// @param self The individual investment to update
+    /// @param liquidityDelta The change in pool liquidity as a result of the investment update
+    /// @param feeGrowthInside0X128 The all-time fee growth in token0, per unit of liquidity, inside the investment's tick boundaries
+    /// @param feeGrowthInside1X128 The all-time fee growth in token1, per unit of liquidity, inside the investment's tick boundaries
+    function update(
+        Desc storage self,
+        int128 liquidityDelta,
+        uint256 feeGrowthInside0X128,
+        uint256 feeGrowthInside1X128
     ) internal {
-        Desc memory _user = User; //_user not stored in blockchain
+        Desc memory _self = self;
 
-        uint128 liquidity_update;
-
-        if (Total_liquidation == 0) {
-            require(_user.User_Liquidity > 0, "No Problem"); // No Poke For 0 Liquidity
-            liquidity_update = _user.User_Liquidity;
+        uint128 liquidityNext;
+        if (liquidityDelta == 0) {
+            require(_self.amountOfLiquidity > 0, 'NP'); // disallow pokes for 0 liquidity investments
+            liquidityNext = _self.amountOfLiquidity;
         } else {
-            liquidity_update = LiquidityMath.addDelta(
-                _user.User_Liquidity,
-                Total_liquidation
-            );
+            liquidityNext = LiquidityMath.addDeltaToLiquidity(_self.amountOfLiquidity, liquidityDelta);
         }
 
-        // Update/calculate the token0/token1 fees
-        uint128 token0 = uint128(
-            Math.mulDiv(
-                feeUpdateInside0firstx128 - _user.feeUpdationInside0lastx128, // will give us the amount remaing amount of the user fees
-                _user.User_Liquidity, // amount of liquidity which the user invested
-                FixedPoint128.Q128 // Q128 -  Notation unsigned integer type . Q128 - 2**128
-            )
-        );
-        uint128 token1 = uint128(
-            Math.mulDiv(
-                feeUpdateInside1firstx128 - _user.feeUpdationInside1lastx128,
-                _user.User_Liquidity,
-                FixedPoint128.Q128
-            )
-        );
+        // calculate accumulated fees
+        uint128 tokensOwed0 =
+            uint128(
+                Math.mulDiv(
+                    feeGrowthInside0X128 - _self.feeGrowthInside0LastX128PerUnit,
+                    _self.amountOfLiquidity,
+                    FixedPoint128.Q128
+                )
+            );
+        uint128 tokensOwed1 =
+            uint128(
+                Math.mulDiv(
+                    feeGrowthInside1X128 - _self.feeGrowthInside1LastX128PerUnit,
+                    _self.amountOfLiquidity,
+                    FixedPoint128.Q128
+                )
+            );
 
-        // Update User Final Investment
-        if (Total_liquidation != 0) User.User_Liquidity = liquidity_update;
-        User.feeUpdationInside0lastx128 = feeUpdateInside0firstx128;
-        User.feeUpdationInside1lastx128 = feeUpdateInside1firstx128;
-        if (token0 > 0 || token1 > 0) {
+        // update the position
+        if (liquidityDelta != 0) self.amountOfLiquidity = liquidityNext;
+        self.feeGrowthInside0LastX128PerUnit = feeGrowthInside0X128;
+        self.feeGrowthInside1LastX128PerUnit = feeGrowthInside1X128;
+        if (tokensOwed0 > 0 || tokensOwed1 > 0) {
             // overflow is acceptable, have to withdraw before you hit type(uint128).max fees
-            User.token0 += token0;
-            User.token1 += token1;
+            self.tokensOwed0ToOwner += tokensOwed0;
+            self.tokensOwed1ToOwner += tokensOwed1;
         }
     }
 }
