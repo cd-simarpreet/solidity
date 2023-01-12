@@ -1,0 +1,25 @@
+{
+  "dependencies": {
+    "prettier": "^2.8.2"
+  },
+  "name": "solidity",
+  "version": "1.0.0",
+  "main": "index.js",
+  "devDependencies": {},
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "format": "prettier --write .",
+    "push": "npm run format && git add . && git commit -m 'Auto formatting' && git push origin"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cd-simarpreet/solidity.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/cd-simarpreet/solidity/issues"
+  },
+  "homepage": "https://github.com/cd-simarpreet/solidity#readme",
+  "description": ""
+}
