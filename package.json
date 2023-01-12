@@ -8,8 +8,7 @@
   "devDependencies": {},
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "format": "prettier --write .",
-    "push": "npm run format && git add . && git commit -m 'Auto formatting' && git push origin"
+    "format": "prettier --write ."
   },
   "repository": {
     "type": "git",
